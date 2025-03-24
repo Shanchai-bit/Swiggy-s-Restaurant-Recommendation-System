@@ -1,111 +1,111 @@
-from jwt import encode
 import streamlit as st
 import pandas as pd
+import numpy as np
 import pickle
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import OneHotEncoder
+import os
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import issparse  # Import sparse matrix checker
 
-# Cache the function to load the cleaned data to avoid reloading on each interaction
+# Set data directory path (Cross-platform compatible)
+DATA_DIR = os.path.join("D:\Guvi_Project\Swiggy’s Restaurant Recommendation System\Data")
+
+# Function to load CSV files with caching for performance optimization
+@st.cache_data
+def load_csv(filename):
+    """Loads a CSV file from the specified data directory."""
+    file_path = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(file_path):
+        st.error(f"{filename} file not found!")
+        st.stop()
+    return pd.read_csv(file_path)
+
+# Function to load pickled files (models, encoders, scalers) with caching
 @st.cache_resource
-def load_cleaned_data():
-    cleaned_df = pd.read_csv(r"D:\Guvi_Project\Swiggy’s Restaurant Recommendation System\Data\Cleaned_data.csv")
-    return cleaned_df
+def load_pickle(filename):
+    """Loads a pickled file (e.g., encoder, scaler) from the specified data directory."""
+    file_path = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(file_path):
+        st.error(f"{filename} file not found!")
+        st.stop()
+    with open(file_path, "rb") as f:
+        return pickle.load(f)
 
-# Cache the function to load the encoded data to avoid reloading on each interaction
-@st.cache_resource
-def load_encoded_data():
-    encoded_df = pd.read_csv(r"D:\Guvi_Project\Swiggy’s Restaurant Recommendation System\Data\Encoded_data.csv")
-    return encoded_df
+# Load required datasets and pre-trained models
+cleaned_df = load_csv("Cleaned_data.csv")  # Cleaned restaurant data
+encoded_df = load_csv("Encoded_data.csv")  # Encoded features for similarity comparison
+encoder = load_pickle("encoder.pkl")  # Pre-trained OneHotEncoder
+scaler = load_pickle("scalar.pkl")  # Pre-fitted MinMaxScaler
 
-# Cache the trained KMeans model so it isn't reloaded multiple times
-@st.cache_resource
-def load_kmeans_model():
-    kmeans_file_path = r"D:\Guvi_Project\Swiggy’s Restaurant Recommendation System\Data\trained_model_file.pkl"
-    with open(kmeans_file_path, "rb") as f:
-        kmeans = pickle.load(f)
-    return kmeans
+# Streamlit UI Setup
+st.title("🍽️ Swiggy’s Restaurant Recommendation System")
+st.sidebar.header("🔍 User Preferences")
 
-# Cache the OneHotEncoder so it's not reloaded multiple times
-@st.cache_resource
-def load_encoder():
-    encoder_file_path = r"D:\Guvi_Project\Swiggy’s Restaurant Recommendation System\Data\encoder.pkl"
-    with open(encoder_file_path, "rb") as f:
-        encoder = pickle.load(f)
-    return encoder
+# Sidebar inputs for user preferences
+selected_city = st.sidebar.selectbox("📍 Select City", cleaned_df["city"].unique())
+selected_cuisine = st.sidebar.selectbox("🍛 Select Cuisine", cleaned_df["cuisine"].unique())
+rating_preference = st.sidebar.slider("⭐ Minimum Rating", 0.0, 5.0, 3.0, step=0.1)
+cost_preference = st.sidebar.slider("💰 Maximum Cost", int(cleaned_df["cost"].min()), int(cleaned_df["cost"].max()), int(cleaned_df["cost"].median()))
+rating_count_preference = st.sidebar.slider("🗳️ Minimum Rating Count", 0, int(cleaned_df["rating_count"].max()), 10)
 
-# Streamlit UI
-st.title("Restaurant Recommendation System")
-st.sidebar.header("User Preferences")
+# Collect user inputs into a dictionary
+user_input = {
+    "city": selected_city,
+    "cuisine": selected_cuisine,
+    "rating": rating_preference,
+    "cost": cost_preference,
+    "rating_count": rating_count_preference
+}
 
-# User Inputs from session state (if exists)
-if 'user_input' not in st.session_state:
-    st.session_state.user_input = {
-        "city": None,
-        "cuisine": None,
-        "rating": 3.0,
-        "cost": 0,
-        "rating_count": 0
-    }
+def find_nearest_restaurants(user_input, cleaned_df, encoder, scaler):
+    """
+    Finds the top 10 most similar restaurants based on user preferences using cosine similarity.
+    
+    Parameters:
+        user_input (dict): Dictionary containing user preferences (city, cuisine, rating, cost, rating_count).
+        cleaned_df (DataFrame): Original cleaned dataset containing restaurant information.
+        encoder (OneHotEncoder): Pre-trained encoder for categorical features.
+        scaler (StandardScaler): Pre-trained scaler for numerical features.
 
-# Load data and models (only once)
-cleaned_df = load_cleaned_data()
-encoded_df = load_encoded_data()
-kmeans = load_kmeans_model()
-encoder = load_encoder()
+    Returns:
+        DataFrame: Top 10 recommended restaurants.
+    """
+    # Convert user input to a DataFrame
+    user_df = pd.DataFrame([user_input])
 
-# Assign clusters to cleaned data (done once)
-if 'cluster' not in st.session_state:
-    cleaned_df["cluster"] = kmeans.labels_
-    st.session_state.cluster = cleaned_df["cluster"]
+    # Encode categorical features (city, cuisine) using OneHotEncoder
+    transformed_cat_array = encoder.transform(user_df[['city', 'cuisine']])
+    
+    # Convert sparse matrix to dense array if necessary
+    if issparse(transformed_cat_array):
+        transformed_cat_array = transformed_cat_array.toarray()
+    
+    # Convert encoded array into a DataFrame with appropriate feature names
+    transformed_cat_array_df = pd.DataFrame(transformed_cat_array, columns=encoder.get_feature_names_out())
 
-# Sidebar for user input
-selected_city = st.sidebar.selectbox("Select City", cleaned_df["city"].unique(), index=0)
-selected_cuisine = st.sidebar.selectbox("Select Cuisine", cleaned_df["cuisine"].unique(), index=0)
-rating_preference = st.sidebar.slider("Minimum Rating", 0.0, 5.0, 3.0, step=0.1)
-cost_preference = st.sidebar.slider("Maximum Cost", int(cleaned_df["cost"].min()), int(cleaned_df["cost"].max()), int(cleaned_df["cost"].median()))
-rating_count_preference = st.sidebar.selectbox("Minimum Rating Count", cleaned_df["rating_count"].unique())
+    # Standardize numerical features (rating, rating_count, cost) using StandardScaler
+    transformed_num_array = scaler.transform(user_df[['rating', 'rating_count', 'cost']])
+    transformed_num_array_df = pd.DataFrame(transformed_num_array, columns=['rating', 'rating_count', 'cost'])
 
-# Update session state with user inputs
-if selected_city != st.session_state.user_input['city']:
-    st.session_state.user_input["city"] = selected_city
-if selected_cuisine != st.session_state.user_input['cuisine']:
-    st.session_state.user_input["cuisine"] = selected_cuisine
-if rating_preference != st.session_state.user_input['rating']:
-    st.session_state.user_input["rating"] = rating_preference
-if cost_preference != st.session_state.user_input['cost']:
-    st.session_state.user_input["cost"] = cost_preference
-if rating_count_preference != st.session_state.user_input['rating_count']:
-    st.session_state.user_input["rating_count"] = rating_count_preference
+    # Combine encoded categorical features with standardized numerical features
+    transformed_res = pd.concat([transformed_num_array_df, transformed_cat_array_df], axis=1)
+    
+    # Compute cosine similarity between user input and all restaurant feature vectors
+    similarity_scores = cosine_similarity(encoded_df, transformed_res).flatten()
 
-user_input = st.session_state.user_input
+    # Get indices of the top 10 most similar restaurants
+    nearest_idx = similarity_scores.argsort()[-10:][::-1]
 
-if st.sidebar.button("Get Recommendations"):
-    input_df = pd.DataFrame([user_input])
+    # Retrieve recommended restaurants based on similarity
+    recommendations = cleaned_df.iloc[nearest_idx]
+    
+    # Reset index for better readability in Streamlit UI
+    recommendations.reset_index(drop=True, inplace=True)
+    recommendations.index += 1  # Start index from 1 instead of 0
+    
+    return recommendations
 
-    # One-Hot Encoding for User Input (using pre-trained encoder)
-    encoded_data = []
-    one = OneHotEncoder()
-    encoder_col = one.fit_transform(input_df[['city', 'cuisine']])
-    encoded_data = pd.DataFrame(encoder_col.toarray(), columns=(['City', 'Cuisine']))
-    concat_df = pd.concat([encoded_data, input_df], axis=1)
-    concat_df.drop(columns=['city', 'cuisine'], inplace=True)
-    st.write(concat_df)
-    # # Predict the cluster of the input data
-    input_cluster = kmeans.predict(concat_df)[0]
-
-    # # Ensure cluster assignments for the cleaned dataset
-    # if 'cluster' not in cleaned_df.columns:
-    #     cleaned_df["cluster"] = kmeans.predict(encoded_df)
-
-    # # Filter recommendations
-    # recommended_restaurants = cleaned_df[(cleaned_df["cluster"] == input_cluster) &
-    #                                     (cleaned_df["rating"] >= user_input["rating"]) &
-    #                                     (cleaned_df["cost"] <= user_input["cost"]) &
-    #                                     (cleaned_df["rating_count"] >= user_input["rating_count"])]
-
-    # # Display results
-    # if recommended_restaurants.empty:
-    #     st.write("No restaurants found matching your preferences.")
-    # else:
-    #     st.write(f"Recommended Restaurants from Cluster {input_cluster}:")
-    #     st.write(recommended_restaurants[["restaurant_name", "city", "cuisine", "rating", "cost", "rating_count"]])
+# Display recommendations when the user clicks the button
+if st.sidebar.button("🎯 Get Recommendations"):
+    recommendations = find_nearest_restaurants(user_input, cleaned_df, encoder, scaler)
+    st.success("✅ Here are the best matches for you!")
+    st.dataframe(recommendations, use_container_width=True)
